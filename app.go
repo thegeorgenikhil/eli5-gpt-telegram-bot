@@ -6,14 +6,15 @@ import (
 	"log"
 	"strings"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api"
-	gogpt "github.com/sashabaranov/go-gpt3"
+	"github.com/PullRequestInc/go-gpt3"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
 	TelegramToken string `mapstructure:"tgToken"`
 	GptToken      string `mapstructure:"gptToken"`
+	Preamble      string `mapstructure:"preamble"`
 }
 
 func LoadConfig(path string) (c Config, err error) {
@@ -33,35 +34,36 @@ func LoadConfig(path string) (c Config, err error) {
 	return
 }
 
-func sendChatGPT(c *gogpt.Client, sendText string) string {
+func sendChatGPT(apiKey, sendText string) string {
 	ctx := context.Background()
+	client := gpt3.NewClient(apiKey)
 
-	req := gogpt.CompletionRequest{
-		Model:            gogpt.GPT3TextDavinci003,
-		MaxTokens:        2048,
-		Prompt:           sendText,
-		FrequencyPenalty: 0,
-		PresencePenalty:  0,
-	}
+	var response string
 
-	resp, err := c.CreateCompletion(ctx, req)
+	err := client.CompletionStreamWithEngine(ctx, gpt3.TextDavinci003Engine, gpt3.CompletionRequest{
+		Prompt:      []string{sendText},
+		MaxTokens:   gpt3.IntPtr(100),
+		Temperature: gpt3.Float32Ptr(0),
+	}, func(res *gpt3.CompletionResponse) {
+		response += res.Choices[0].Text
+	})
 	if err != nil {
-		return "ChatGPT API error"
-	} else {
-		return resp.Choices[0].Text
+		log.Println(err)
+		return "ChatGPT is not available"
 	}
+	return response
 }
 
 func main() {
+	var userPrompt string
+	var gptPrompt string
 	// Reading config.yaml
 	config, err := LoadConfig(".")
+	apiKey := config.GptToken
 
 	if err != nil {
 		panic(fmt.Errorf("fatal error with config.yaml: %w", err))
 	}
-
-	// Chat GPT initialization
-	chatGPT := gogpt.NewClient(config.GptToken)
 
 	// Telegram initialization
 	bot, err := tgbotapi.NewBotAPI(config.TelegramToken)
@@ -83,16 +85,28 @@ func main() {
 			continue
 		}
 
-		// If message present and not start from '/cg ' - ignore message
-		if !strings.HasPrefix(update.Message.Text, "/cg ") {
+		// check if message has '/topic' or '/phrase' as prefix
+		if !strings.HasPrefix(update.Message.Text, "/topic") && !strings.HasPrefix(update.Message.Text, "/phrase") {
 			continue
 		}
 
-		// Cut text prefix '/cg '
-		cutText, _ := strings.CutPrefix(update.Message.Text, "/cg ")
+		// remove '/topic' or '/phrase' from message
+		if strings.HasPrefix(update.Message.Text, "/topic") {
+			userPrompt = strings.TrimPrefix(update.Message.Text, "/topic")
+			gptPrompt = config.Preamble + "TOPIC: "
+		} else if strings.HasPrefix(update.Message.Text, "/phrase") {
+			userPrompt = strings.TrimPrefix(update.Message.Text, "/phrase")
+			gptPrompt = config.Preamble + "PHRASE: "
+		}
 
-		// Send request to ChatGPT
-		update.Message.Text = sendChatGPT(chatGPT, cutText)
+		if userPrompt != "" {
+			gptPrompt += userPrompt
+			// Send request to ChatGPT
+			res := sendChatGPT(apiKey, gptPrompt)
+			update.Message.Text = res
+		} else {
+			update.Message.Text = "Please, enter your topic or phrase"
+		}
 
 		// Send message to Telegram
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, update.Message.Text)
